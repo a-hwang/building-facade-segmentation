@@ -173,8 +173,8 @@ def main():
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     
-    dataset = COCODataset("/Users/alberthwang/Library/Projects/edge_detection/train/_annotations.coco.json", transforms=transform)
-    val_dataset = COCODataset("/Users/alberthwang/Library/Projects/edge_detection/valid/_annotations.coco.json", transforms=transform)
+    dataset = COCODataset("train/_annotations.coco.json", transforms=transform)
+    val_dataset = COCODataset("valid/_annotations.coco.json", transforms=transform)
     
     # Add collate_fn to DataLoader
     train_loader = DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=collate_fn)
@@ -182,6 +182,10 @@ def main():
 
     # Build and train model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device.type == "cuda":
+        print("Using CUDA GPU:", torch.cuda.get_device_name(0))
+    else:
+        print("Using CPU for training")
     model = build_model().to(device)
     
     # Training parameters
