@@ -238,10 +238,15 @@ def evaluate_model(model, test_loader, device):
 
 def main():
     parser = argparse.ArgumentParser(description="Edge Detector")
-    parser.add_argument('--inference', action='store_true', help="Run inference only without training")
-    parser.add_argument('--random', action='store_true', help="Select a random test image from the test folder")
+    parser.add_argument('--train', type=int, metavar='N', help="Train model for N epochs")
     parser.add_argument('--evaluate', action='store_true', help="Evaluate model performance on test set")
+    parser.add_argument('--inference', action='store_true', help="Run inference only on test image")
+    parser.add_argument('--random', action='store_true', help="Select a random test image from the test folder")
     args = parser.parse_args()
+
+    # Validate arguments
+    if not any([args.train is not None, args.evaluate, args.inference]):
+        parser.error("At least one of --train, --evaluate, or --inference must be specified")
 
     # Create dataset and data loaders
     transform = Compose([
@@ -288,36 +293,11 @@ def main():
         # You can still load a checkpoint passed by args if required (optional)
         pass
 
-    if args.evaluate:
-        print("Evaluating model on test set...")
-        # Create test dataset and loader
-        test_dataset = COCODataset("test/_annotations.coco.json", transforms=transform)
-        test_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
-        
-        # Run evaluation
-        metrics = evaluate_model(model, test_loader, device)
-        
-        # Print results
-        print("\nEvaluation Results:")
-        print(f"Mean IoU: {metrics['IoU']:.4f}")
-        print(f"Precision: {metrics['Precision']:.4f}")
-        print(f"Recall: {metrics['Recall']:.4f}")
-        print(f"F1-Score: {metrics['F1-Score']:.4f}")
-        
-        # Save metrics to file
-        results_path = os.path.join("output", "evaluation_results.json")
-        with open(results_path, 'w') as f:
-            json.dump(metrics, f, indent=4)
-        print(f"\nResults saved to {results_path}")
-        
-        if not args.inference:  # If not only running inference, continue with training
-            print("\nProceeding with training...")
-
-    # Run training loop only if not in inference mode
-    if not args.inference:
+    # Training phase
+    if args.train is not None:
         params = [p for p in model.parameters() if p.requires_grad]
         optimizer = optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0005)
-        num_epochs = 10  # Total epochs to run from the resume point
+        num_epochs = args.train  # Use specified number of epochs
 
         for epoch in range(starting_epoch, starting_epoch + num_epochs):
             model.train()
@@ -337,64 +317,84 @@ def main():
 
             avg_loss = total_loss / len(train_loader)
             print(f"Epoch {epoch}: Average Loss = {avg_loss:.4f}")
-            # Save checkpoint with the epoch number appended
             ckpt_path = os.path.join(checkpoints_folder, f"model_checkpoint_epoch_{epoch}.pth")
             torch.save(model.state_dict(), ckpt_path)
             print(f"Saved checkpoint to {ckpt_path}")
 
-    # Run inference and overlay labels on test image
-    model.eval()
-    test_folder = "test"
-    if args.random:
-        test_files = glob.glob(os.path.join(test_folder, "*.jpg"))
-        if not test_files:
-            print("No jpg files found in the test folder.")
-            return
-        test_image_path = random.choice(test_files)
-        print("Selected random test image:", test_image_path)
-    else:
-        test_image_path = os.path.join(test_folder, "20230329_200455_067_R_scaled_1_png_jpg.rf.ca555ec50f4cc78a87475458b99004dc.jpg")
-    
-    test_image = Image.open(test_image_path).convert("RGB")
-    test_transform = ToTensor()
-    image, _ = test_transform(test_image, None)
-    with torch.no_grad():
-        prediction = model([image.to(device)])
-        masks = prediction[0]['masks'].cpu().numpy()
+    # Evaluation phase
+    if args.evaluate:
+        print("\nEvaluating model on test set...")
+        test_dataset = COCODataset("test/_annotations.coco.json", transforms=transform)
+        test_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
+        
+        metrics = evaluate_model(model, test_loader, device)
+        
+        print("\nEvaluation Results:")
+        print(f"Mean IoU: {metrics['IoU']:.4f}")
+        print(f"Precision: {metrics['Precision']:.4f}")
+        print(f"Recall: {metrics['Recall']:.4f}")
+        print(f"F1-Score: {metrics['F1-Score']:.4f}")
+        
+        results_path = os.path.join("output", "evaluation_results.json")
+        with open(results_path, 'w') as f:
+            json.dump(metrics, f, indent=4)
+        print(f"\nResults saved to {results_path}")
 
-    test_image_cv = cv2.cvtColor(np.array(test_image), cv2.COLOR_RGB2BGR)
-    preds = prediction[0]
-    boxes = preds['boxes'].cpu().numpy()
-    labels = preds['labels'].cpu().numpy()
-    scores = preds['scores'].cpu().numpy()
+    # Inference phase
+    if args.inference or args.random:
+        model.eval()
+        test_folder = "test"
+        
+        if args.random:
+            test_files = glob.glob(os.path.join(test_folder, "*.jpg"))
+            if not test_files:
+                print("No jpg files found in the test folder.")
+                return
+            test_image_path = random.choice(test_files)
+            print("Selected random test image:", test_image_path)
+        else:
+            test_image_path = os.path.join(test_folder, "20230329_200455_067_R_scaled_1_png_jpg.rf.ca555ec50f4cc78a87475458b99004dc.jpg")
+        
+        test_image = Image.open(test_image_path).convert("RGB")
+        test_transform = ToTensor()
+        image, _ = test_transform(test_image, None)
+        with torch.no_grad():
+            prediction = model([image.to(device)])
+            masks = prediction[0]['masks'].cpu().numpy()
 
-    output_folder = "output"
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
+        test_image_cv = cv2.cvtColor(np.array(test_image), cv2.COLOR_RGB2BGR)
+        preds = prediction[0]
+        boxes = preds['boxes'].cpu().numpy()
+        labels = preds['labels'].cpu().numpy()
+        scores = preds['scores'].cpu().numpy()
 
-    # Use the base name from the test image for output files
-    base_name = os.path.splitext(os.path.basename(test_image_path))[0]
-    for box, label, score in zip(boxes, labels, scores):
-        if score < 0.5:
-            continue
-        x1, y1, x2, y2 = box.astype(int)
-        cv2.rectangle(test_image_cv, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(
-            test_image_cv,
-            f"ID:{label} {score:.2f}",
-            (x1, max(y1 - 10, 0)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 0, 255),
-            2
-        )
+        output_folder = "output"
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
 
-    overlay_path = os.path.join(output_folder, f"{base_name}_with_labels.jpg")
-    cv2.imwrite(overlay_path, test_image_cv)
-    print("Overlayed image saved to", overlay_path)
+        # Use the base name from the test image for output files
+        base_name = os.path.splitext(os.path.basename(test_image_path))[0]
+        for box, label, score in zip(boxes, labels, scores):
+            if score < 0.5:
+                continue
+            x1, y1, x2, y2 = box.astype(int)
+            cv2.rectangle(test_image_cv, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.putText(
+                test_image_cv,
+                f"ID:{label} {score:.2f}",
+                (x1, max(y1 - 10, 0)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 255),
+                2
+            )
 
-    # Pass along base_name to export_to_rhino so output filename contains it
-    export_to_rhino(masks, base_name)
+        overlay_path = os.path.join(output_folder, f"{base_name}_with_labels.jpg")
+        cv2.imwrite(overlay_path, test_image_cv)
+        print("Overlayed image saved to", overlay_path)
+
+        # Pass along base_name to export_to_rhino so output filename contains it
+        export_to_rhino(masks, base_name)
 
 if __name__ == "__main__":
     main()
