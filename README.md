@@ -1,4 +1,4 @@
-# Edge Detection Model
+# Edge Detection Model for Building Facades
 
 A PyTorch-based implementation of an edge detection model using Mask R-CNN with ResNet-50 backbone for detecting and extracting edges from images, with export capabilities to Rhino 3DM format.
 
@@ -14,7 +14,7 @@ This model uses instance segmentation to detect edges in images and can:
 ## Requirements
 
 ```bash
-pip install torch torchvision opencv-python pillow numpy rhino3dm
+pip install -r requirements.txt
 ```
 
 ## Dataset Structure
