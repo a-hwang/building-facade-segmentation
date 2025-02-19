@@ -10,6 +10,10 @@ import json
 import os
 import torch.optim as optim
 from torch.utils.data import DataLoader
+import argparse
+import re
+import glob
+import random
 
 class Compose:
     def __init__(self, transforms):
@@ -76,7 +80,8 @@ class COCODataset(torch.utils.data.Dataset):
                 if "bbox" in ann and "segmentation" in ann:
                     x, y, w, h = ann["bbox"]
                     boxes.append([x, y, x + w, y + h])
-                    labels.append(1)  # 1 for building class
+                    # Use the actual category id from the annotation
+                    labels.append(ann["category_id"])
                     
                     # Create binary mask from segmentation
                     mask = self.create_mask(height, width, ann["segmentation"])
@@ -112,12 +117,12 @@ class COCODataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.images)
 
-def build_model():
+# Modify your build_model function to accept num_classes
+def build_model(num_classes):
     # Load pre-trained model
     model = maskrcnn_resnet50_fpn(weights="DEFAULT")
     
-    # Modify the model for binary segmentation (building vs background)
-    num_classes = 2  # background and building
+    # Modify the model for multi-class detection
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
     
@@ -126,6 +131,8 @@ def build_model():
 def extract_edges_from_masks(masks):
     edges = []
     for mask in masks:
+        # Squeeze to ensure it's 2D (H x W)
+        mask = np.squeeze(mask)
         # Convert float mask to binary uint8
         mask = (mask > 0.5).astype(np.uint8) * 255
         
@@ -144,21 +151,22 @@ def extract_edges_from_masks(masks):
     
     return edges
 
-def export_to_rhino(edges):
-    model = rhino3dm.File3dm()
+def export_to_rhino(masks, base_name):
+    edges = extract_edges_from_masks(masks)
+    model3dm = rhino3dm.File3dm()
     
     for edge_points in edges:
-        # Convert points to 3D points
         points3d = [rhino3dm.Point3d(x, y, 0) for x, y in edge_points]
-        
-        # Create polyline curve
-        curve = rhino3dm.Curve.CreateControlPointCurve(points3d, 1)  # degree 1 for polyline
-        
-        # Add curve to model
+        curve = rhino3dm.Curve.CreateControlPointCurve(points3d, 1)
         if curve.IsValid:
-            model.Objects.AddCurve(curve)
+            model3dm.Objects.AddCurve(curve)
     
-    model.Write("detected_edges.3dm")
+    output_folder = "output"
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+    out_path = os.path.join(output_folder, f"detected_edges_{base_name}.3dm")
+    model3dm.Write(out_path, 6)
+    print("Exported Rhino file to", out_path)
 
 def collate_fn(batch):
     """
@@ -167,6 +175,11 @@ def collate_fn(batch):
     return tuple(zip(*batch))
 
 def main():
+    parser = argparse.ArgumentParser(description="Edge Detector")
+    parser.add_argument('--inference', action='store_true', help="Run inference only without training")
+    parser.add_argument('--random', action='store_true', help="Select a random test image from the test folder")
+    args = parser.parse_args()
+
     # Create dataset and data loaders
     transform = Compose([
         ToTensor(),
@@ -175,56 +188,125 @@ def main():
     
     dataset = COCODataset("train/_annotations.coco.json", transforms=transform)
     val_dataset = COCODataset("valid/_annotations.coco.json", transforms=transform)
-    
-    # Add collate_fn to DataLoader
     train_loader = DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=1, collate_fn=collate_fn)
 
-    # Build and train model
+    # Determine number of classes from annotations
+    with open("train/_annotations.coco.json", "r") as f:
+        train_coco = json.load(f)
+    num_categories = len(train_coco.get("categories", []))
+    num_classes = num_categories + 1  # +1 for background
+
+    # Build model and set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     if device.type == "cuda":
         print("Using CUDA GPU:", torch.cuda.get_device_name(0))
     else:
         print("Using CPU for training")
-    model = build_model().to(device)
+    model = build_model(num_classes).to(device)
     
-    # Training parameters
-    params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
-    num_epochs = 10
+    # Define the checkpoints folder
+    checkpoints_folder = "model_checkpoints"
+    if not os.path.exists(checkpoints_folder):
+        os.makedirs(checkpoints_folder)
 
-    # Training loop
-    for epoch in range(num_epochs):
-        model.train()
-        total_loss = 0
-        for images, targets in train_loader:
-            images = list(image.to(device) for image in images)
-            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-            
-            loss_dict = model(images, targets)
-            losses = sum(loss for loss in loss_dict.values())
-            
-            optimizer.zero_grad()
-            losses.backward()
-            optimizer.step()
-            
-            total_loss += losses.item()
-            
-        avg_loss = total_loss / len(train_loader)
-        print(f"Epoch {epoch}: Average Loss = {avg_loss:.4f}")
+    # Get a list of existing checkpoint files (e.g., model_checkpoint_epoch_9.pth)
+    checkpoint_files = glob.glob(os.path.join(checkpoints_folder, "model_checkpoint_epoch_*.pth"))
+    starting_epoch = 0
+    if checkpoint_files:
+        # Get the checkpoint with the largest epoch number
+        latest_ckpt = max(checkpoint_files, key=lambda fname: int(re.findall(r'\d+', fname)[0]))
+        # Load the checkpoint
+        model.load_state_dict(torch.load(latest_ckpt))
+        # Parse the epoch number from filename and set training to resume after that epoch
+        starting_epoch = int(re.findall(r'\d+', latest_ckpt)[0]) + 1
+        print(f"Loaded model checkpoint from {latest_ckpt}")
+    else:
+        # You can still load a checkpoint passed by args if required (optional)
+        pass
 
-    # Run inference
+    # Run training loop only if not in inference mode
+    if not args.inference:
+        params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0005)
+        num_epochs = 10  # Total epochs to run from the resume point
+
+        for epoch in range(starting_epoch, starting_epoch + num_epochs):
+            model.train()
+            total_loss = 0
+            for images, targets in train_loader:
+                images = list(image.to(device) for image in images)
+                targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
+                loss_dict = model(images, targets)
+                losses = sum(loss for loss in loss_dict.values())
+
+                optimizer.zero_grad()
+                losses.backward()
+                optimizer.step()
+
+                total_loss += losses.item()
+
+            avg_loss = total_loss / len(train_loader)
+            print(f"Epoch {epoch}: Average Loss = {avg_loss:.4f}")
+            # Save checkpoint with the epoch number appended
+            ckpt_path = os.path.join(checkpoints_folder, f"model_checkpoint_epoch_{epoch}.pth")
+            torch.save(model.state_dict(), ckpt_path)
+            print(f"Saved checkpoint to {ckpt_path}")
+
+    # Run inference and overlay labels on test image
     model.eval()
-    test_image = Image.open("test/image_example.jpg").convert("RGB")
+    test_folder = "test"
+    if args.random:
+        test_files = glob.glob(os.path.join(test_folder, "*.jpg"))
+        if not test_files:
+            print("No jpg files found in the test folder.")
+            return
+        test_image_path = random.choice(test_files)
+        print("Selected random test image:", test_image_path)
+    else:
+        test_image_path = os.path.join(test_folder, "20230329_200455_067_R_scaled_1_png_jpg.rf.ca555ec50f4cc78a87475458b99004dc.jpg")
+    
+    test_image = Image.open(test_image_path).convert("RGB")
     test_transform = ToTensor()
-    test_image = Image.open("test/image_example.jpg").convert("RGB")
+    image, _ = test_transform(test_image, None)
     with torch.no_grad():
-        image, _ = test_transform(test_image, None)
         prediction = model([image.to(device)])
         masks = prediction[0]['masks'].cpu().numpy()
-    
-    edges = extract_edges_from_masks(masks)
-    export_to_rhino(edges)
+
+    test_image_cv = cv2.cvtColor(np.array(test_image), cv2.COLOR_RGB2BGR)
+    preds = prediction[0]
+    boxes = preds['boxes'].cpu().numpy()
+    labels = preds['labels'].cpu().numpy()
+    scores = preds['scores'].cpu().numpy()
+
+    output_folder = "output"
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    # Use the base name from the test image for output files
+    base_name = os.path.splitext(os.path.basename(test_image_path))[0]
+    for box, label, score in zip(boxes, labels, scores):
+        if score < 0.5:
+            continue
+        x1, y1, x2, y2 = box.astype(int)
+        cv2.rectangle(test_image_cv, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(
+            test_image_cv,
+            f"ID:{label} {score:.2f}",
+            (x1, max(y1 - 10, 0)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 255),
+            2
+        )
+
+    overlay_path = os.path.join(output_folder, f"{base_name}_with_labels.jpg")
+    cv2.imwrite(overlay_path, test_image_cv)
+    print("Overlayed image saved to", overlay_path)
+
+    # Pass along base_name to export_to_rhino so output filename contains it
+    export_to_rhino(masks, base_name)
 
 if __name__ == "__main__":
     main()
