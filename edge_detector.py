@@ -11,6 +11,9 @@ import os
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import argparse
+import re
+import glob
+import random
 
 class Compose:
     def __init__(self, transforms):
@@ -148,21 +151,22 @@ def extract_edges_from_masks(masks):
     
     return edges
 
-def export_to_rhino(edges):
-    model = rhino3dm.File3dm()
+def export_to_rhino(masks, base_name):
+    edges = extract_edges_from_masks(masks)
+    model3dm = rhino3dm.File3dm()
     
     for edge_points in edges:
-        # Convert points to 3D points
         points3d = [rhino3dm.Point3d(x, y, 0) for x, y in edge_points]
-        
-        # Create polyline curve
-        curve = rhino3dm.Curve.CreateControlPointCurve(points3d, 1)  # degree 1 for polyline
-        
-        # Add curve to model
+        curve = rhino3dm.Curve.CreateControlPointCurve(points3d, 1)
         if curve.IsValid:
-            model.Objects.AddCurve(curve)
+            model3dm.Objects.AddCurve(curve)
     
-    model.Write("detected_edges.3dm")
+    output_folder = "output"
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+    out_path = os.path.join(output_folder, f"detected_edges_{base_name}.3dm")
+    model3dm.Write(out_path, 6)
+    print("Exported Rhino file to", out_path)
 
 def collate_fn(batch):
     """
@@ -173,6 +177,7 @@ def collate_fn(batch):
 def main():
     parser = argparse.ArgumentParser(description="Edge Detector")
     parser.add_argument('--inference', action='store_true', help="Run inference only without training")
+    parser.add_argument('--random', action='store_true', help="Select a random test image from the test folder")
     args = parser.parse_args()
 
     # Create dataset and data loaders
@@ -200,24 +205,33 @@ def main():
         print("Using CPU for training")
     model = build_model(num_classes).to(device)
     
-    # Load checkpoint if exists
-    checkpoint_path = "model_checkpoint_epoch_9.pth"  # choose preferred epoch
-    if os.path.exists(checkpoint_path):
-        model.load_state_dict(torch.load(checkpoint_path))
-        print("Loaded model checkpoint from", checkpoint_path)
-    elif args.inference:
-        print("No checkpoint available. Cannot run inference without a trained model.")
-        return
+    # Define the checkpoints folder
+    checkpoints_folder = "model_checkpoints"
+    if not os.path.exists(checkpoints_folder):
+        os.makedirs(checkpoints_folder)
+
+    # Get a list of existing checkpoint files (e.g., model_checkpoint_epoch_9.pth)
+    checkpoint_files = glob.glob(os.path.join(checkpoints_folder, "model_checkpoint_epoch_*.pth"))
+    starting_epoch = 0
+    if checkpoint_files:
+        # Get the checkpoint with the largest epoch number
+        latest_ckpt = max(checkpoint_files, key=lambda fname: int(re.findall(r'\d+', fname)[0]))
+        # Load the checkpoint
+        model.load_state_dict(torch.load(latest_ckpt))
+        # Parse the epoch number from filename and set training to resume after that epoch
+        starting_epoch = int(re.findall(r'\d+', latest_ckpt)[0]) + 1
+        print(f"Loaded model checkpoint from {latest_ckpt}")
     else:
-        print("No checkpoint found, proceeding with training.")
+        # You can still load a checkpoint passed by args if required (optional)
+        pass
 
     # Run training loop only if not in inference mode
     if not args.inference:
         params = [p for p in model.parameters() if p.requires_grad]
         optimizer = optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0005)
-        num_epochs = 10
+        num_epochs = 10  # Total epochs to run from the resume point
 
-        for epoch in range(num_epochs):
+        for epoch in range(starting_epoch, starting_epoch + num_epochs):
             model.train()
             total_loss = 0
             for images, targets in train_loader:
@@ -235,11 +249,25 @@ def main():
 
             avg_loss = total_loss / len(train_loader)
             print(f"Epoch {epoch}: Average Loss = {avg_loss:.4f}")
-            torch.save(model.state_dict(), f"model_checkpoint_epoch_{epoch}.pth")
+            # Save checkpoint with the epoch number appended
+            ckpt_path = os.path.join(checkpoints_folder, f"model_checkpoint_epoch_{epoch}.pth")
+            torch.save(model.state_dict(), ckpt_path)
+            print(f"Saved checkpoint to {ckpt_path}")
 
     # Run inference and overlay labels on test image
     model.eval()
-    test_image = Image.open("test/20230329_200455_067_R_scaled_1_png_jpg.rf.ca555ec50f4cc78a87475458b99004dc.jpg").convert("RGB")
+    test_folder = "test"
+    if args.random:
+        test_files = glob.glob(os.path.join(test_folder, "*.jpg"))
+        if not test_files:
+            print("No jpg files found in the test folder.")
+            return
+        test_image_path = random.choice(test_files)
+        print("Selected random test image:", test_image_path)
+    else:
+        test_image_path = os.path.join(test_folder, "20230329_200455_067_R_scaled_1_png_jpg.rf.ca555ec50f4cc78a87475458b99004dc.jpg")
+    
+    test_image = Image.open(test_image_path).convert("RGB")
     test_transform = ToTensor()
     image, _ = test_transform(test_image, None)
     with torch.no_grad():
@@ -256,19 +284,29 @@ def main():
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
+    # Use the base name from the test image for output files
+    base_name = os.path.splitext(os.path.basename(test_image_path))[0]
     for box, label, score in zip(boxes, labels, scores):
         if score < 0.5:
             continue
         x1, y1, x2, y2 = box.astype(int)
         cv2.rectangle(test_image_cv, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(test_image_cv, f"ID:{label} {score:.2f}", (x1, max(y1 - 10, 0)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        cv2.putText(
+            test_image_cv,
+            f"ID:{label} {score:.2f}",
+            (x1, max(y1 - 10, 0)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 255),
+            2
+        )
 
-    cv2.imwrite(os.path.join(output_folder, "test_image_with_labels.jpg"), test_image_cv)
-    print("Overlayed image saved to", os.path.join(output_folder, "test_image_with_labels.jpg"))
+    overlay_path = os.path.join(output_folder, f"{base_name}_with_labels.jpg")
+    cv2.imwrite(overlay_path, test_image_cv)
+    print("Overlayed image saved to", overlay_path)
 
-    edges = extract_edges_from_masks(masks)
-    export_to_rhino(edges)
+    # Pass along base_name to export_to_rhino so output filename contains it
+    export_to_rhino(masks, base_name)
 
 if __name__ == "__main__":
     main()
