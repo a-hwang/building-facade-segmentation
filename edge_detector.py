@@ -173,10 +173,74 @@ def collate_fn(batch):
     """
     return tuple(zip(*batch))
 
+def evaluate_model(model, test_loader, device):
+    model.eval()
+    total_iou = 0
+    total_precision = 0
+    total_recall = 0
+    num_samples = 0
+    
+    print("Starting evaluation...")
+    with torch.no_grad():
+        for images, targets in test_loader:
+            images = list(image.to(device) for image in images)
+            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+            
+            outputs = model(images)
+            
+            for i, output in enumerate(outputs):
+                # Get predicted masks above threshold
+                pred_masks = output['masks'][output['scores'] > 0.5]
+                if len(pred_masks) == 0:
+                    continue
+                
+                # Get ground truth masks
+                gt_masks = targets[i]['masks']
+                if len(gt_masks) == 0:
+                    continue
+                
+                # Calculate metrics
+                pred_masks = pred_masks.squeeze(1)
+                pred_binary = (pred_masks > 0.5).float()
+                
+                # Calculate IoU
+                intersection = torch.sum(pred_binary * gt_masks, dim=(1,2))
+                union = torch.sum(pred_binary + gt_masks > 0.5, dim=(1,2))
+                iou = (intersection / (union + 1e-6)).mean()
+                
+                # Calculate Precision and Recall
+                true_positives = torch.sum(pred_binary * gt_masks, dim=(1,2))
+                pred_positives = torch.sum(pred_binary, dim=(1,2))
+                gt_positives = torch.sum(gt_masks, dim=(1,2))
+                
+                precision = (true_positives / (pred_positives + 1e-6)).mean()
+                recall = (true_positives / (gt_positives + 1e-6)).mean()
+                
+                total_iou += iou.item()
+                total_precision += precision.item()
+                total_recall += recall.item()
+                num_samples += 1
+    
+    # Calculate final metrics
+    mean_iou = total_iou / num_samples if num_samples > 0 else 0
+    mean_precision = total_precision / num_samples if num_samples > 0 else 0
+    mean_recall = total_recall / num_samples if num_samples > 0 else 0
+    f1_score = 2 * (mean_precision * mean_recall) / (mean_precision + mean_recall + 1e-6)
+    
+    metrics = {
+        'IoU': mean_iou,
+        'Precision': mean_precision,
+        'Recall': mean_recall,
+        'F1-Score': f1_score
+    }
+    
+    return metrics
+
 def main():
     parser = argparse.ArgumentParser(description="Edge Detector")
     parser.add_argument('--inference', action='store_true', help="Run inference only without training")
     parser.add_argument('--random', action='store_true', help="Select a random test image from the test folder")
+    parser.add_argument('--evaluate', action='store_true', help="Evaluate model performance on test set")
     args = parser.parse_args()
 
     # Create dataset and data loaders
@@ -223,6 +287,31 @@ def main():
     else:
         # You can still load a checkpoint passed by args if required (optional)
         pass
+
+    if args.evaluate:
+        print("Evaluating model on test set...")
+        # Create test dataset and loader
+        test_dataset = COCODataset("test/_annotations.coco.json", transforms=transform)
+        test_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
+        
+        # Run evaluation
+        metrics = evaluate_model(model, test_loader, device)
+        
+        # Print results
+        print("\nEvaluation Results:")
+        print(f"Mean IoU: {metrics['IoU']:.4f}")
+        print(f"Precision: {metrics['Precision']:.4f}")
+        print(f"Recall: {metrics['Recall']:.4f}")
+        print(f"F1-Score: {metrics['F1-Score']:.4f}")
+        
+        # Save metrics to file
+        results_path = os.path.join("output", "evaluation_results.json")
+        with open(results_path, 'w') as f:
+            json.dump(metrics, f, indent=4)
+        print(f"\nResults saved to {results_path}")
+        
+        if not args.inference:  # If not only running inference, continue with training
+            print("\nProceeding with training...")
 
     # Run training loop only if not in inference mode
     if not args.inference:
