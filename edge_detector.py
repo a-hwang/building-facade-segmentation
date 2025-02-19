@@ -236,6 +236,80 @@ def evaluate_model(model, test_loader, device):
     
     return metrics
 
+def visualize_predictions(image, prediction, categories, output_folder, base_name):
+    """Helper function to visualize both bounding boxes and masks"""
+    # Convert image to OpenCV format
+    image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    
+    # Get predictions
+    preds = prediction[0]
+    boxes = preds['boxes'].cpu().numpy()
+    labels = preds['labels'].cpu().numpy()
+    scores = preds['scores'].cpu().numpy()
+    masks = preds['masks'].cpu().numpy()
+
+    # Create output folder if it doesn't exist
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    # 1. Create bounding box visualization
+    bbox_image = image_cv.copy()
+    for box, label, score in zip(boxes, labels, scores):
+        if score < 0.5:
+            continue
+        x1, y1, x2, y2 = box.astype(int)
+        cv2.rectangle(bbox_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        category_name = categories.get(int(label), "unknown")
+        cv2.putText(
+            bbox_image,
+            f"{category_name} {score:.2f}",
+            (x1, max(y1 - 10, 0)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 255),
+            2
+        )
+
+    # 2. Create mask visualization
+    mask_image = image_cv.copy()
+    np.random.seed(42)  # For consistent colors
+    colors = np.random.randint(0, 255, size=(len(categories), 3), dtype=np.uint8)
+    
+    for mask, label, score in zip(masks, labels, scores):
+        if score < 0.5:
+            continue
+        
+        color = colors[label].tolist()
+        binary_mask = (mask[0] > 0.5).astype(np.uint8)
+        colored_mask = np.zeros_like(image_cv)
+        colored_mask[binary_mask > 0] = color
+        
+        # Apply the colored mask with transparency
+        cv2.addWeighted(colored_mask, 0.5, mask_image, 1, 0, mask_image)
+        
+        # Add category name and score
+        moments = cv2.moments(binary_mask)
+        if moments["m00"] != 0:
+            cx = int(moments["m10"] / moments["m00"])
+            cy = int(moments["m01"] / moments["m00"])
+            category_name = categories.get(int(label), "unknown")
+            cv2.putText(
+                mask_image,
+                f"{category_name} {score:.2f}",
+                (cx, cy),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                2
+            )
+
+    # Save both visualizations
+    cv2.imwrite(os.path.join(output_folder, f"{base_name}_with_boxes.jpg"), bbox_image)
+    cv2.imwrite(os.path.join(output_folder, f"{base_name}_with_masks.jpg"), mask_image)
+    print(f"Saved visualizations to {output_folder}")
+    
+    return masks
+
 def main():
     parser = argparse.ArgumentParser(description="Edge Detector")
     parser.add_argument('--train', type=int, metavar='N', help="Train model for N epochs")
@@ -355,45 +429,23 @@ def main():
         else:
             test_image_path = os.path.join(test_folder, "20230329_200455_067_R_scaled_1_png_jpg.rf.ca555ec50f4cc78a87475458b99004dc.jpg")
         
+        # Load and process image
         test_image = Image.open(test_image_path).convert("RGB")
         test_transform = ToTensor()
         image, _ = test_transform(test_image, None)
+        
+        # Get predictions
         with torch.no_grad():
             prediction = model([image.to(device)])
-            masks = prediction[0]['masks'].cpu().numpy()
-
-        test_image_cv = cv2.cvtColor(np.array(test_image), cv2.COLOR_RGB2BGR)
-        preds = prediction[0]
-        boxes = preds['boxes'].cpu().numpy()
-        labels = preds['labels'].cpu().numpy()
-        scores = preds['scores'].cpu().numpy()
-
-        output_folder = "output"
-        if not os.path.exists(output_folder):
-            os.makedirs(output_folder)
-
-        # Use the base name from the test image for output files
+        
+        # Get category mapping
+        categories = {cat["id"]: cat["name"] for cat in train_coco["categories"]}
+        
+        # Generate visualizations and get masks
         base_name = os.path.splitext(os.path.basename(test_image_path))[0]
-        for box, label, score in zip(boxes, labels, scores):
-            if score < 0.5:
-                continue
-            x1, y1, x2, y2 = box.astype(int)
-            cv2.rectangle(test_image_cv, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(
-                test_image_cv,
-                f"ID:{label} {score:.2f}",
-                (x1, max(y1 - 10, 0)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 0, 255),
-                2
-            )
-
-        overlay_path = os.path.join(output_folder, f"{base_name}_with_labels.jpg")
-        cv2.imwrite(overlay_path, test_image_cv)
-        print("Overlayed image saved to", overlay_path)
-
-        # Pass along base_name to export_to_rhino so output filename contains it
+        masks = visualize_predictions(test_image, prediction, categories, "output", base_name)
+        
+        # Export to Rhino
         export_to_rhino(masks, base_name)
 
 if __name__ == "__main__":
