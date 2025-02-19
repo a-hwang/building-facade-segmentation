@@ -262,7 +262,8 @@ def main():
     # Determine number of classes from annotations
     with open("train/_annotations.coco.json", "r") as f:
         train_coco = json.load(f)
-    num_categories = len(train_coco.get("categories", []))
+    categories = {cat["id"]: cat["name"] for cat in train_coco["categories"]}
+    num_categories = len(categories)
     num_classes = num_categories + 1  # +1 for background
 
     # Build model and set device
@@ -379,9 +380,12 @@ def main():
                 continue
             x1, y1, x2, y2 = box.astype(int)
             cv2.rectangle(test_image_cv, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            
+            # Get category name instead of using ID
+            category_name = categories.get(int(label), "unknown")
             cv2.putText(
                 test_image_cv,
-                f"ID:{label} {score:.2f}",
+                f"{category_name} {score:.2f}",
                 (x1, max(y1 - 10, 0)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
