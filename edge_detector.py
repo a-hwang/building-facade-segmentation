@@ -117,7 +117,6 @@ class COCODataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.images)
 
-# Modify your build_model function to accept num_classes
 def build_model(num_classes):
     # Load pre-trained model
     model = maskrcnn_resnet50_fpn(weights="DEFAULT")
