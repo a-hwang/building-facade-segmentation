@@ -11,8 +11,13 @@ This model uses instance segmentation to detect edges in images and can:
 - Export detected edges to Rhino 3DM format
 - Visualize results with bounding boxes and labels
 
-## Requirements
-
+## Get Started
+We recommend creating a virtual environment:
+```bash
+python -m venv venv
+source venv/bin/activate
+```
+Then install requirements:
 ```bash
 pip install -r requirements.txt
 ```
