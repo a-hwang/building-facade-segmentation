@@ -118,6 +118,31 @@ Evaluation produces the following metrics:
 - Category-based color coding
 - Rhino 3DM export functionality
 
+## Hardware Acceleration
+
+The model supports the following hardware acceleration:
+- NVIDIA CUDA GPUs
+- Apple Metal (MPS) for M1/M2 Macs
+- CPU (fallback)
+
+### Known Issues with Apple Metal
+
+If you encounter MPS-related errors, you can:
+1. Force CPU usage:
+```bash
+python edge_detector.py --train 10 --force-cpu
+```
+
+2. Try reducing batch size:
+```python
+train_loader = DataLoader(dataset, batch_size=1, shuffle=True, collate_fn=collate_fn)
+```
+
+3. Check your PyTorch version supports MPS:
+```bash
+pip install --upgrade torch
+```
+
 ## Requirements
 
 - Python 3.8+
