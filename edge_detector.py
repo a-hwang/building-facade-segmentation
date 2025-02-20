@@ -164,6 +164,7 @@ def export_to_rhino(masks, base_name):
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
     out_path = os.path.join(output_folder, f"detected_edges_{base_name}.3dm")
+    out_path = get_unique_filepath(out_path)
     model3dm.Write(out_path, 6)
     print("Exported Rhino file to", out_path)
 
@@ -203,7 +204,20 @@ def evaluate_model(model, test_loader, device):
                 pred_masks = pred_masks.squeeze(1)
                 pred_binary = (pred_masks > 0.5).float()
                 
-                # Calculate IoU
+                # Ensure gt_masks shape matches pred_binary; if not, resize gt_masks
+                if pred_binary.shape != gt_masks.shape:
+                    import torch.nn.functional as F
+                    gt_masks = gt_masks.unsqueeze(1).float()  # add channel dimension
+                    gt_masks = F.interpolate(gt_masks, size=pred_binary.shape[-2:], mode='nearest')
+                    gt_masks = gt_masks.squeeze(1)
+                
+                # If the number of instances still don't match, trim both tensors:
+                if pred_binary.shape[0] != gt_masks.shape[0]:
+                    min_instances = min(pred_binary.shape[0], gt_masks.shape[0])
+                    pred_binary = pred_binary[:min_instances]
+                    gt_masks = gt_masks[:min_instances]
+
+                # Now calculate IoU
                 intersection = torch.sum(pred_binary * gt_masks, dim=(1,2))
                 union = torch.sum(pred_binary + gt_masks > 0.5, dim=(1,2))
                 iou = (intersection / (union + 1e-6)).mean()
@@ -238,21 +252,17 @@ def evaluate_model(model, test_loader, device):
 
 def visualize_predictions(image, prediction, categories, output_folder, base_name):
     """Helper function to visualize both bounding boxes and masks"""
-    # Convert image to OpenCV format
     image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
     
-    # Get predictions
     preds = prediction[0]
     boxes = preds['boxes'].cpu().numpy()
     labels = preds['labels'].cpu().numpy()
     scores = preds['scores'].cpu().numpy()
     masks = preds['masks'].cpu().numpy()
 
-    # Create output folder if it doesn't exist
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
-    # 1. Create bounding box visualization
     bbox_image = image_cv.copy()
     for box, label, score in zip(boxes, labels, scores):
         if score < 0.5:
@@ -269,10 +279,12 @@ def visualize_predictions(image, prediction, categories, output_folder, base_nam
             (0, 0, 255),
             2
         )
+    bbox_path = os.path.join(output_folder, f"{base_name}_with_boxes.jpg")
+    bbox_path = get_unique_filepath(bbox_path)
+    cv2.imwrite(bbox_path, bbox_image)
 
-    # 2. Create mask visualization
     mask_image = image_cv.copy()
-    np.random.seed(42)  # For consistent colors
+    np.random.seed(42)
     colors = np.random.randint(0, 255, size=(len(categories), 3), dtype=np.uint8)
     
     for mask, label, score in zip(masks, labels, scores):
@@ -283,11 +295,8 @@ def visualize_predictions(image, prediction, categories, output_folder, base_nam
         binary_mask = (mask[0] > 0.5).astype(np.uint8)
         colored_mask = np.zeros_like(image_cv)
         colored_mask[binary_mask > 0] = color
-        
-        # Apply the colored mask with transparency
         cv2.addWeighted(colored_mask, 0.5, mask_image, 1, 0, mask_image)
         
-        # Add category name and score
         moments = cv2.moments(binary_mask)
         if moments["m00"] != 0:
             cx = int(moments["m10"] / moments["m00"])
@@ -302,10 +311,9 @@ def visualize_predictions(image, prediction, categories, output_folder, base_nam
                 (255, 255, 255),
                 2
             )
-
-    # Save both visualizations
-    cv2.imwrite(os.path.join(output_folder, f"{base_name}_with_boxes.jpg"), bbox_image)
-    cv2.imwrite(os.path.join(output_folder, f"{base_name}_with_masks.jpg"), mask_image)
+    mask_path = os.path.join(output_folder, f"{base_name}_with_masks.jpg")
+    mask_path = get_unique_filepath(mask_path)
+    cv2.imwrite(mask_path, mask_image)
     print(f"Saved visualizations to {output_folder}")
     
     return masks
@@ -341,27 +349,37 @@ def to_device(data, device):
             return data.cpu()
         return data
 
+def get_unique_filepath(filepath):
+    if not os.path.exists(filepath):
+        return filepath
+    base, ext = os.path.splitext(filepath)
+    counter = 1
+    new_filepath = f"{base}_{counter}{ext}"
+    while os.path.exists(new_filepath):
+        counter += 1
+        new_filepath = f"{base}_{counter}{ext}"
+    return new_filepath
+
 def main():
     parser = argparse.ArgumentParser(description="Edge Detector")
     parser.add_argument('--train', type=int, metavar='N', help="Train model for N epochs")
     parser.add_argument('--evaluate', action='store_true', help="Evaluate model performance on test set")
     parser.add_argument('--inference', action='store_true', help="Run inference only on test image")
     parser.add_argument('--random', action='store_true', help="Select a random test image from the test folder")
+    parser.add_argument('--file', type=str, help="Specify a test image file for inference")
+    parser.add_argument('--checkpoint', type=int, help="Manually specify checkpoint epoch number to load")
     parser.add_argument('--force-cpu', action='store_true', help="Force CPU usage even if GPU is available")
     args = parser.parse_args()
 
-    # Modified device selection
     if args.force_cpu:
         device = torch.device('cpu')
         device_name = "CPU (forced)"
     else:
         device, device_name = get_device()
 
-    # Validate arguments
     if not any([args.train is not None, args.evaluate, args.inference]):
         parser.error("At least one of --train, --evaluate, or --inference must be specified")
 
-    # Create dataset and data loaders
     transform = Compose([
         ToTensor(),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -372,36 +390,36 @@ def main():
     train_loader = DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=1, collate_fn=collate_fn)
 
-    # Determine number of classes from annotations
     with open("train/_annotations.coco.json", "r") as f:
         train_coco = json.load(f)
     num_categories = len(train_coco.get("categories", []))
-    num_classes = num_categories + 1  # +1 for background
+    num_classes = num_categories + 1
 
-    # Build model and set device
     print(f"Using {device_name} for training")
     model = build_model(num_classes).to(device)
     
-    # Define the checkpoints folder
     checkpoints_folder = "model_checkpoints"
     if not os.path.exists(checkpoints_folder):
         os.makedirs(checkpoints_folder)
 
-    # Get a list of existing checkpoint files (e.g., model_checkpoint_epoch_9.pth)
-    checkpoint_files = glob.glob(os.path.join(checkpoints_folder, "model_checkpoint_epoch_*.pth"))
     starting_epoch = 0
-    if checkpoint_files:
-        # Get the checkpoint with the largest epoch number
-        latest_ckpt = max(checkpoint_files, key=lambda fname: int(re.findall(r'\d+', fname)[0]))
-        # Load the checkpoint with device handling
-        checkpoint = torch.load(latest_ckpt, map_location=device)
-        model.load_state_dict(checkpoint)
-        # Parse the epoch number from filename and set training to resume after that epoch
-        starting_epoch = int(re.findall(r'\d+', latest_ckpt)[0]) + 1
-        print(f"Loaded model checkpoint from {latest_ckpt}")
+    if args.checkpoint:
+        ckpt_path = os.path.join(checkpoints_folder, f"model_checkpoint_epoch_{args.checkpoint}.pth")
+        if os.path.exists(ckpt_path):
+            checkpoint = torch.load(ckpt_path, map_location=device)
+            model.load_state_dict(checkpoint)
+            starting_epoch = args.checkpoint + 1
+            print(f"Loaded checkpoint from {ckpt_path}")
+        else:
+            print(f"Checkpoint {ckpt_path} not found. Starting from scratch.")
     else:
-        # You can still load a checkpoint passed by args if required (optional)
-        pass
+        checkpoint_files = glob.glob(os.path.join(checkpoints_folder, "model_checkpoint_epoch_*.pth"))
+        if checkpoint_files:
+            latest_ckpt = max(checkpoint_files, key=lambda fname: int(re.findall(r'\d+', fname)[0]))
+            checkpoint = torch.load(latest_ckpt, map_location=device)
+            model.load_state_dict(checkpoint)
+            starting_epoch = int(re.findall(r'\d+', latest_ckpt)[0]) + 1
+            print(f"Loaded latest checkpoint from {latest_ckpt}")
 
     # Training phase
     if args.train is not None:
@@ -470,7 +488,13 @@ def main():
         model.eval()
         test_folder = "test"
         
-        if args.random:
+        if args.file:
+            test_image_path = args.file
+            if not os.path.exists(test_image_path):
+                print(f"Specified file {test_image_path} does not exist.")
+                return
+            print("Using specified test image:", test_image_path)
+        elif args.random:
             test_files = glob.glob(os.path.join(test_folder, "*.jpg"))
             if not test_files:
                 print("No jpg files found in the test folder.")
