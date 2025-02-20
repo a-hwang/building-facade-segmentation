@@ -236,13 +236,126 @@ def evaluate_model(model, test_loader, device):
     
     return metrics
 
+def visualize_predictions(image, prediction, categories, output_folder, base_name):
+    """Helper function to visualize both bounding boxes and masks"""
+    # Convert image to OpenCV format
+    image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    
+    # Get predictions
+    preds = prediction[0]
+    boxes = preds['boxes'].cpu().numpy()
+    labels = preds['labels'].cpu().numpy()
+    scores = preds['scores'].cpu().numpy()
+    masks = preds['masks'].cpu().numpy()
+
+    # Create output folder if it doesn't exist
+    if not os.path.exists(output_folder):
+        os.makedirs(output_folder)
+
+    # 1. Create bounding box visualization
+    bbox_image = image_cv.copy()
+    for box, label, score in zip(boxes, labels, scores):
+        if score < 0.5:
+            continue
+        x1, y1, x2, y2 = box.astype(int)
+        cv2.rectangle(bbox_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        category_name = categories.get(int(label), "unknown")
+        cv2.putText(
+            bbox_image,
+            f"{category_name} {score:.2f}",
+            (x1, max(y1 - 10, 0)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 0, 255),
+            2
+        )
+
+    # 2. Create mask visualization
+    mask_image = image_cv.copy()
+    np.random.seed(42)  # For consistent colors
+    colors = np.random.randint(0, 255, size=(len(categories), 3), dtype=np.uint8)
+    
+    for mask, label, score in zip(masks, labels, scores):
+        if score < 0.5:
+            continue
+        
+        color = colors[label].tolist()
+        binary_mask = (mask[0] > 0.5).astype(np.uint8)
+        colored_mask = np.zeros_like(image_cv)
+        colored_mask[binary_mask > 0] = color
+        
+        # Apply the colored mask with transparency
+        cv2.addWeighted(colored_mask, 0.5, mask_image, 1, 0, mask_image)
+        
+        # Add category name and score
+        moments = cv2.moments(binary_mask)
+        if moments["m00"] != 0:
+            cx = int(moments["m10"] / moments["m00"])
+            cy = int(moments["m01"] / moments["m00"])
+            category_name = categories.get(int(label), "unknown")
+            cv2.putText(
+                mask_image,
+                f"{category_name} {score:.2f}",
+                (cx, cy),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                2
+            )
+
+    # Save both visualizations
+    cv2.imwrite(os.path.join(output_folder, f"{base_name}_with_boxes.jpg"), bbox_image)
+    cv2.imwrite(os.path.join(output_folder, f"{base_name}_with_masks.jpg"), mask_image)
+    print(f"Saved visualizations to {output_folder}")
+    
+    return masks
+
+def get_device():
+    """Helper function to get the best available device with fallback options"""
+    if torch.cuda.is_available():
+        return torch.device('cuda'), "CUDA GPU: " + torch.cuda.get_device_name(0)
+    elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        try:
+            # Test MPS with a small tensor operation
+            test_tensor = torch.ones(1).to('mps')
+            _ = test_tensor + test_tensor
+            return torch.device('mps'), "Apple Metal GPU"
+        except Exception as e:
+            print(f"Warning: MPS (Metal) initialization failed, falling back to CPU. Error: {str(e)}")
+            return torch.device('cpu'), "CPU (MPS fallback)"
+    return torch.device('cpu'), "CPU"
+
+def to_device(data, device):
+    """Helper function to safely move data to device"""
+    try:
+        if isinstance(data, (list, tuple)):
+            return [to_device(x, device) for x in data]
+        elif isinstance(data, dict):
+            return {k: to_device(v, device) for k, v in data.items()}
+        elif isinstance(data, torch.Tensor):
+            return data.to(device)
+        return data
+    except Exception as e:
+        print(f"Warning: Failed to move data to device {device}, using CPU. Error: {str(e)}")
+        if isinstance(data, torch.Tensor):
+            return data.cpu()
+        return data
+
 def main():
     parser = argparse.ArgumentParser(description="Edge Detector")
     parser.add_argument('--train', type=int, metavar='N', help="Train model for N epochs")
     parser.add_argument('--evaluate', action='store_true', help="Evaluate model performance on test set")
     parser.add_argument('--inference', action='store_true', help="Run inference only on test image")
     parser.add_argument('--random', action='store_true', help="Select a random test image from the test folder")
+    parser.add_argument('--force-cpu', action='store_true', help="Force CPU usage even if GPU is available")
     args = parser.parse_args()
+
+    # Modified device selection
+    if args.force_cpu:
+        device = torch.device('cpu')
+        device_name = "CPU (forced)"
+    else:
+        device, device_name = get_device()
 
     # Validate arguments
     if not any([args.train is not None, args.evaluate, args.inference]):
@@ -266,11 +379,7 @@ def main():
     num_classes = num_categories + 1  # +1 for background
 
     # Build model and set device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    if device.type == "cuda":
-        print("Using CUDA GPU:", torch.cuda.get_device_name(0))
-    else:
-        print("Using CPU for training")
+    print(f"Using {device_name} for training")
     model = build_model(num_classes).to(device)
     
     # Define the checkpoints folder
@@ -284,8 +393,9 @@ def main():
     if checkpoint_files:
         # Get the checkpoint with the largest epoch number
         latest_ckpt = max(checkpoint_files, key=lambda fname: int(re.findall(r'\d+', fname)[0]))
-        # Load the checkpoint
-        model.load_state_dict(torch.load(latest_ckpt))
+        # Load the checkpoint with device handling
+        checkpoint = torch.load(latest_ckpt, map_location=device)
+        model.load_state_dict(checkpoint)
         # Parse the epoch number from filename and set training to resume after that epoch
         starting_epoch = int(re.findall(r'\d+', latest_ckpt)[0]) + 1
         print(f"Loaded model checkpoint from {latest_ckpt}")
@@ -299,27 +409,42 @@ def main():
         optimizer = optim.SGD(params, lr=0.001, momentum=0.9, weight_decay=0.0005)
         num_epochs = args.train  # Use specified number of epochs
 
-        for epoch in range(starting_epoch, starting_epoch + num_epochs):
-            model.train()
-            total_loss = 0
-            for images, targets in train_loader:
-                images = list(image.to(device) for image in images)
-                targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        try:
+            for epoch in range(starting_epoch, starting_epoch + num_epochs):
+                model.train()
+                total_loss = 0
+                for images, targets in train_loader:
+                    try:
+                        images = to_device(images, device)
+                        targets = to_device(targets, device)
 
-                loss_dict = model(images, targets)
-                losses = sum(loss for loss in loss_dict.values())
+                        loss_dict = model(images, targets)
+                        losses = sum(loss for loss in loss_dict.values())
 
-                optimizer.zero_grad()
-                losses.backward()
-                optimizer.step()
+                        optimizer.zero_grad()
+                        losses.backward()
+                        optimizer.step()
 
-                total_loss += losses.item()
+                        total_loss += losses.item()
+                    except RuntimeError as e:
+                        print(f"Warning: Training batch failed, skipping. Error: {str(e)}")
+                        continue
 
-            avg_loss = total_loss / len(train_loader)
-            print(f"Epoch {epoch}: Average Loss = {avg_loss:.4f}")
-            ckpt_path = os.path.join(checkpoints_folder, f"model_checkpoint_epoch_{epoch}.pth")
-            torch.save(model.state_dict(), ckpt_path)
-            print(f"Saved checkpoint to {ckpt_path}")
+                avg_loss = total_loss / len(train_loader)
+                print(f"Epoch {epoch}: Average Loss = {avg_loss:.4f}")
+                
+                # Save checkpoint on CPU
+                model.to('cpu')
+                ckpt_path = os.path.join(checkpoints_folder, f"model_checkpoint_epoch_{epoch}.pth")
+                torch.save(model.state_dict(), ckpt_path)
+                model.to(device)
+                print(f"Saved checkpoint to {ckpt_path}")
+        except Exception as e:
+            print(f"Error during training: {str(e)}")
+            print("Falling back to CPU...")
+            device = torch.device('cpu')
+            model = model.cpu()
+            # Continue training on CPU
 
     # Evaluation phase
     if args.evaluate:
@@ -355,45 +480,23 @@ def main():
         else:
             test_image_path = os.path.join(test_folder, "20230329_200455_067_R_scaled_1_png_jpg.rf.ca555ec50f4cc78a87475458b99004dc.jpg")
         
+        # Load and process image
         test_image = Image.open(test_image_path).convert("RGB")
         test_transform = ToTensor()
         image, _ = test_transform(test_image, None)
+        
+        # Get predictions
         with torch.no_grad():
             prediction = model([image.to(device)])
-            masks = prediction[0]['masks'].cpu().numpy()
-
-        test_image_cv = cv2.cvtColor(np.array(test_image), cv2.COLOR_RGB2BGR)
-        preds = prediction[0]
-        boxes = preds['boxes'].cpu().numpy()
-        labels = preds['labels'].cpu().numpy()
-        scores = preds['scores'].cpu().numpy()
-
-        output_folder = "output"
-        if not os.path.exists(output_folder):
-            os.makedirs(output_folder)
-
-        # Use the base name from the test image for output files
+        
+        # Get category mapping
+        categories = {cat["id"]: cat["name"] for cat in train_coco["categories"]}
+        
+        # Generate visualizations and get masks
         base_name = os.path.splitext(os.path.basename(test_image_path))[0]
-        for box, label, score in zip(boxes, labels, scores):
-            if score < 0.5:
-                continue
-            x1, y1, x2, y2 = box.astype(int)
-            cv2.rectangle(test_image_cv, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(
-                test_image_cv,
-                f"ID:{label} {score:.2f}",
-                (x1, max(y1 - 10, 0)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 0, 255),
-                2
-            )
-
-        overlay_path = os.path.join(output_folder, f"{base_name}_with_labels.jpg")
-        cv2.imwrite(overlay_path, test_image_cv)
-        print("Overlayed image saved to", overlay_path)
-
-        # Pass along base_name to export_to_rhino so output filename contains it
+        masks = visualize_predictions(test_image, prediction, categories, "output", base_name)
+        
+        # Export to Rhino
         export_to_rhino(masks, base_name)
 
 if __name__ == "__main__":
