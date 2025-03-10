@@ -432,7 +432,16 @@ def main():
 
                 avg_loss = total_loss / len(train_loader)
                 print(f"Epoch {epoch}: Average Loss = {avg_loss:.4f}")
-                
+
+                # Validation phase
+                model.eval()
+                val_metrics = evaluate_model(model, val_loader, device)
+                print(f"Validation Epoch {epoch}: IoU: {val_metrics['IoU']:.4f}, "
+                      f"Precision: {val_metrics['Precision']:.4f}, "
+                      f"Recall: {val_metrics['Recall']:.4f}, "
+                      f"F1-Score: {val_metrics['F1-Score']:.4f}")
+                model.train()
+
                 # Save checkpoint on CPU
                 model.to('cpu')
                 ckpt_path = os.path.join(checkpoints_folder, f"model_checkpoint_epoch_{epoch}.pth")
