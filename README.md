@@ -1,17 +1,25 @@
 # Edge Detection Model for Building Facades
 
-A PyTorch-based implementation of an edge detection model using instance segmentation. By default it uses Mask R-CNN with a ResNet-50 backbone for detecting and extracting edges from building facades, with export capabilities to Rhino 3DM format. You can also choose among several other pretrained models.
+A PyTorch-based implementation of an edge detection model using instance segmentation. By default, it uses Mask R-CNN with a ResNet-50 backbone for detecting and extracting edges from building facades and now includes performance graphing capabilities as well as Rhino 3DM export for segmentation masks.
 
 ## Overview
 
-This model uses instance segmentation to detect building elements and can:
-- Train on custom datasets in COCO format
-- Evaluate model performance
-- Run inference on test images
-- Export detected edges to Rhino 3DM format
-- Visualize results with both bounding boxes and segmentation masks
+This project supports:
+- **Training:** Train the model on custom datasets in COCO format.
+- **Evaluation:** Evaluate the model using bounding box metrics.
+- **Inference:** Run inference on test images with visualizations of predictions (bounding boxes and, if available, segmentation masks). If masks are present, edges are extracted and exported as Rhino 3DM files.
+- **Graphing:** Generate graphs of model performance (IoU, Precision, Recall, F1-Score) across selected epochs using new command-line options.
+
+The following outputs are generated:
+- **Checkpoints:** Saved in a per-model subfolder (e.g., `maskrcnn_resnet50_fpn_checkpoints`).
+- **Evaluation Metrics:** Saved as JSON files in the `output/` folder.
+- **Bounding Box Visualizations:** Output images in the `output/` folder.
+- **Segmentation Mask Visualizations:** If available, saved in the `output/` folder.
+- **Performance Graphs:** Generated and saved as PNG images into `output/`.
+- **Rhino 3DM Exports:** Created from segmentation outputs if masks are available.
 
 ## Get Started
+
 We recommend creating a virtual environment:
 ```bash
 python -m venv venv
@@ -92,12 +100,25 @@ Or run inference on a random test image:
 ```bash
 python edge_detector.py --inference --random
 ```
+During inference, bounding box predictions are visualized, and if segmentation masks are available, they are overlaid on the image and processed to export a Rhino 3DM file with extracted edge curves.
+
+### Graphing Performance
+
+Generate performance graphs (IoU, Precision, Recall, F1-Score) over selected epochs:
+```bash
+python edge_detector.py --graph-epochs 1 2 3 4 5
+```
+or using a range:
+```bash
+python edge_detector.py --graph-range 1-10
+```
+The performance graphs will be saved in the `output/` folder.
 
 ### Combined Operations
 
 You can combine operations (they will execute in this order):
 ```bash
-python edge_detector.py --train 10 --evaluate --inference
+python edge_detector.py --train 10 --evaluate --inference --graph-range 1-10
 ```
 
 ## Model Architecture
@@ -119,8 +140,8 @@ Your chosen model will be loaded using a command line argument, and its checkpoi
 The model generates:
 - Model checkpoints (`<model_name>_checkpoints/model_checkpoint_epoch_*.pth`)
 - Evaluation metrics (`output/evaluation_results.json`)
-- Bounding box visualizations (`output/*_with_boxes.jpg`)
-- Segmentation mask visualizations (`output/*_with_masks.jpg`)
+- Bounding box and mask visualization images (`output/*_with_boxes.jpg` and `output/*_with_masks.jpg`)
+- Performance graphs (`output/*_graph.png`)
 - Rhino 3DM files with extracted edges (`output/detected_edges_*.3dm`)
 
 ## Metrics
@@ -140,6 +161,7 @@ Evaluation produces the following metrics:
 - Dual visualization outputs (boxes and masks)
 - Category-based color coding
 - Rhino 3DM export functionality
+- Performance graphing across epochs via CLI arguments
 
 ## Hardware Acceleration
 
