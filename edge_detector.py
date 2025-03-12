@@ -258,18 +258,21 @@ def evaluate_model(model, test_loader, device):
     return metrics
 
 def visualize_predictions(image, prediction, categories, output_folder, base_name):
-    """Helper function to visualize both bounding boxes and masks"""
+    """Helper function to visualize both bounding boxes and masks (if available)"""
     image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
     
     preds = prediction[0]
     boxes = preds['boxes'].cpu().numpy()
     labels = preds['labels'].cpu().numpy()
     scores = preds['scores'].cpu().numpy()
-    masks = preds['masks'].cpu().numpy()
+    
+    # Check if the model provided masks
+    masks = preds['masks'].cpu().numpy() if 'masks' in preds else None
 
     if not os.path.exists(output_folder):
         os.makedirs(output_folder)
 
+    # Draw bounding boxes
     bbox_image = image_cv.copy()
     for box, label, score in zip(boxes, labels, scores):
         if score < 0.5:
@@ -290,38 +293,42 @@ def visualize_predictions(image, prediction, categories, output_folder, base_nam
     bbox_path = get_unique_filepath(bbox_path)
     cv2.imwrite(bbox_path, bbox_image)
 
-    mask_image = image_cv.copy()
-    np.random.seed(42)
-    colors = np.random.randint(0, 255, size=(len(categories), 3), dtype=np.uint8)
-    
-    for mask, label, score in zip(masks, labels, scores):
-        if score < 0.5:
-            continue
+    # Draw masks if available
+    if masks is not None:
+        mask_image = image_cv.copy()
+        np.random.seed(42)
+        colors = np.random.randint(0, 255, size=(len(categories), 3), dtype=np.uint8)
         
-        color = colors[label].tolist()
-        binary_mask = (mask[0] > 0.5).astype(np.uint8)
-        colored_mask = np.zeros_like(image_cv)
-        colored_mask[binary_mask > 0] = color
-        cv2.addWeighted(colored_mask, 0.5, mask_image, 1, 0, mask_image)
-        
-        moments = cv2.moments(binary_mask)
-        if moments["m00"] != 0:
-            cx = int(moments["m10"] / moments["m00"])
-            cy = int(moments["m01"] / moments["m00"])
-            category_name = categories.get(int(label), "unknown")
-            cv2.putText(
-                mask_image,
-                f"{category_name} {score:.2f}",
-                (cx, cy),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 255),
-                2
-            )
-    mask_path = os.path.join(output_folder, f"{base_name}_with_masks.jpg")
-    mask_path = get_unique_filepath(mask_path)
-    cv2.imwrite(mask_path, mask_image)
-    print(f"Saved visualizations to {output_folder}")
+        for mask, label, score in zip(masks, labels, scores):
+            if score < 0.5:
+                continue
+            
+            color = colors[label].tolist()
+            binary_mask = (mask[0] > 0.5).astype(np.uint8)
+            colored_mask = np.zeros_like(image_cv)
+            colored_mask[binary_mask > 0] = color
+            cv2.addWeighted(colored_mask, 0.5, mask_image, 1, 0, mask_image)
+            
+            moments = cv2.moments(binary_mask)
+            if moments["m00"] != 0:
+                cx = int(moments["m10"] / moments["m00"])
+                cy = int(moments["m01"] / moments["m00"])
+                category_name = categories.get(int(label), "unknown")
+                cv2.putText(
+                    mask_image,
+                    f"{category_name} {score:.2f}",
+                    (cx, cy),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 255, 255),
+                    2
+                )
+        mask_path = os.path.join(output_folder, f"{base_name}_with_masks.jpg")
+        mask_path = get_unique_filepath(mask_path)
+        cv2.imwrite(mask_path, mask_image)
+        print(f"Saved visualizations to {output_folder}")
+    else:
+        print("No masks predicted; skipping mask visualization.")
     
     return masks
 
@@ -535,12 +542,19 @@ def main():
         # Get category mapping
         categories = {cat["id"]: cat["name"] for cat in train_coco["categories"]}
         
-        # Generate visualizations and get masks
-        base_name = os.path.splitext(os.path.basename(test_image_path))[0]
-        masks = visualize_predictions(test_image, prediction, categories, "output", base_name)
+        # Determine checkpoint information for output file naming.
+        # Use args.checkpoint if provided; otherwise say "latest"
+        checkpoint_info = args.checkpoint if args.checkpoint is not None else "latest"
+        original_base = os.path.splitext(os.path.basename(test_image_path))[0]
+        new_base_name = f"{args.model}_epoch_{checkpoint_info}_{original_base}"
         
-        # Export to Rhino
-        export_to_rhino(masks, base_name)
+        # Generate visualizations and get masks using new_base_name
+        masks = visualize_predictions(test_image, prediction, categories, "output", new_base_name)
+        
+        if masks is not None:
+            export_to_rhino(masks, new_base_name)
+        else:
+            print("Skipping Rhino export as no masks are available.")
 
 if __name__ == "__main__":
     main()
