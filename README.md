@@ -1,6 +1,6 @@
 # Edge Detection Model for Building Facades
 
-A PyTorch-based implementation of an edge detection model using Mask R-CNN with ResNet-50 backbone for detecting and extracting edges from building facades, with export capabilities to Rhino 3DM format.
+A PyTorch-based implementation of an edge detection model using instance segmentation. By default it uses Mask R-CNN with a ResNet-50 backbone for detecting and extracting edges from building facades, with export capabilities to Rhino 3DM format. You can also choose among several other pretrained models.
 
 ## Overview
 
@@ -32,8 +32,8 @@ project_root/
 │   └── _annotations.coco.json
 ├── test/
 │   └── _annotations.coco.json
-├── model_checkpoints/
-└── output/
+├── output/
+└── <model_name>_checkpoints/    # Checkpoints are saved per-model (see below)
 ```
 
 ## Categories
@@ -53,10 +53,26 @@ The model detects the following building elements:
 
 ### Training
 
-Train the model for a specified number of epochs:
+Train the model for a specified number of epochs using the default model (Mask R-CNN with ResNet-50):
 ```bash
 python edge_detector.py --train 10
 ```
+
+You can also specify a different pretrained model with the `--model` parameter. Valid options are:
+- maskrcnn_resnet50_fpn
+- fasterrcnn_resnet50_fpn
+- fasterrcnn_resnet50_fpn_v2
+- fasterrcnn_mobilenet_v3_large_fpn
+- retinanet_resnet50_fpn
+- fcos_resnet50_fpn
+- keypointrcnn_resnet50_fpn
+
+For example, to use Faster R-CNN with ResNet-50:
+```bash
+python edge_detector.py --train 10 --model fasterrcnn_resnet50_fpn
+```
+
+The checkpoints for each model will be saved in a dedicated subfolder named `<model_name>_checkpoints` (e.g., `maskrcnn_resnet50_fpn_checkpoints`).
 
 ### Evaluation
 
@@ -67,12 +83,12 @@ python edge_detector.py --evaluate
 
 ### Inference
 
-Run inference on a test image:
+Run inference on a given test image:
 ```bash
-python edge_detector.py --inference
+python edge_detector.py --inference --file path/to/test_image.jpg
 ```
 
-Run inference on a random test image:
+Or run inference on a random test image:
 ```bash
 python edge_detector.py --inference --random
 ```
@@ -86,15 +102,22 @@ python edge_detector.py --train 10 --evaluate --inference
 
 ## Model Architecture
 
-- Base: Mask R-CNN
-- Backbone: ResNet-50
-- FPN: Feature Pyramid Network
-- Customized for facade element detection
+- **Default Model:** Mask R-CNN  
+- **Backbone:** ResNet-50 (when using Mask R-CNN)  
+- **Alternate Models:** You can choose any of the following:
+  - Faster R-CNN with ResNet-50
+  - Faster R-CNN with ResNet-50 (v2)
+  - Faster R-CNN with MobileNet V3 Large FPN
+  - Retinanet with ResNet-50 FPN
+  - FCOS with ResNet-50 FPN
+  - Keypoint R-CNN with ResNet-50 FPN
+
+Your chosen model will be loaded using a command line argument, and its checkpoints will automatically save to a dedicated folder.
 
 ## Outputs
 
 The model generates:
-- Model checkpoints (`model_checkpoints/model_checkpoint_epoch_*.pth`)
+- Model checkpoints (`<model_name>_checkpoints/model_checkpoint_epoch_*.pth`)
 - Evaluation metrics (`output/evaluation_results.json`)
 - Bounding box visualizations (`output/*_with_boxes.jpg`)
 - Segmentation mask visualizations (`output/*_with_masks.jpg`)
@@ -110,7 +133,7 @@ Evaluation produces the following metrics:
 
 ## Features
 
-- Automatic checkpoint saving and loading
+- Automatic checkpoint saving and loading into per-model subfolders
 - CUDA support for GPU acceleration
 - Custom data loading with COCO format support
 - Edge extraction with Douglas-Peucker simplification

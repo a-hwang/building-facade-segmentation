@@ -117,14 +117,19 @@ class COCODataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.images)
 
-def build_model(num_classes):
-    # Load pre-trained model
-    model = maskrcnn_resnet50_fpn(weights="DEFAULT")
-    
-    # Modify the model for multi-class detection
-    in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-    
+def build_model(model_name, num_classes):
+    # Get the constructor from torchvision.models.detection using the model name.
+    model_fn = getattr(torchvision.models.detection, model_name)
+    model = model_fn(weights="DEFAULT")
+    # For models with ROI heads (which have a box_predictor), modify for our number of classes.
+    if model_name in {
+        "maskrcnn_resnet50_fpn", 
+        "fasterrcnn_resnet50_fpn", 
+        "fasterrcnn_resnet50_fpn_v2", 
+        "fasterrcnn_mobilenet_v3_large_fpn"
+    }:
+        in_features = model.roi_heads.box_predictor.cls_score.in_features
+        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
     return model
 
 def extract_edges_from_masks(masks):
@@ -156,8 +161,10 @@ def export_to_rhino(masks, base_name):
     
     for edge_points in edges:
         points3d = [rhino3dm.Point3d(x, y, 0) for x, y in edge_points]
+        if len(points3d) < 2:  # Skip if not enough points to form a curve.
+            continue
         curve = rhino3dm.Curve.CreateControlPointCurve(points3d, 1)
-        if curve.IsValid:
+        if curve is not None and curve.IsValid:
             model3dm.Objects.AddCurve(curve)
     
     output_folder = "output"
@@ -368,18 +375,29 @@ def main():
     parser.add_argument('--random', action='store_true', help="Select a random test image from the test folder")
     parser.add_argument('--file', type=str, help="Specify a test image file for inference")
     parser.add_argument('--checkpoint', type=int, help="Manually specify checkpoint epoch number to load")
+    parser.add_argument('--model', type=str, default="maskrcnn_resnet50_fpn",
+                        choices=[
+                            "maskrcnn_resnet50_fpn",
+                            "fasterrcnn_resnet50_fpn",
+                            "fasterrcnn_resnet50_fpn_v2",
+                            "fasterrcnn_mobilenet_v3_large_fpn",
+                            "retinanet_resnet50_fpn",
+                            "fcos_resnet50_fpn",
+                            "keypointrcnn_resnet50_fpn"
+                        ],
+                        help="Select which pretrained model to use. Defaults to maskrcnn_resnet50_fpn")
     parser.add_argument('--force-cpu', action='store_true', help="Force CPU usage even if GPU is available")
     args = parser.parse_args()
-
+    
     if args.force_cpu:
         device = torch.device('cpu')
         device_name = "CPU (forced)"
     else:
         device, device_name = get_device()
-
+    
     if not any([args.train is not None, args.evaluate, args.inference]):
         parser.error("At least one of --train, --evaluate, or --inference must be specified")
-
+    
     transform = Compose([
         ToTensor(),
         Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -389,19 +407,20 @@ def main():
     val_dataset = COCODataset("valid/_annotations.coco.json", transforms=transform)
     train_loader = DataLoader(dataset, batch_size=2, shuffle=True, collate_fn=collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=1, collate_fn=collate_fn)
-
+    
     with open("train/_annotations.coco.json", "r") as f:
         train_coco = json.load(f)
     num_categories = len(train_coco.get("categories", []))
     num_classes = num_categories + 1
-
-    print(f"Using {device_name} for training")
-    model = build_model(num_classes).to(device)
     
-    checkpoints_folder = "model_checkpoints"
+    print(f"Using {device_name} for training")
+    model = build_model(args.model, num_classes).to(device)
+    
+    # Use a subfolder for checkpoints based on the chosen model.
+    checkpoints_folder = f"{args.model}_checkpoints"
     if not os.path.exists(checkpoints_folder):
         os.makedirs(checkpoints_folder)
-
+    
     starting_epoch = 0
     if args.checkpoint:
         ckpt_path = os.path.join(checkpoints_folder, f"model_checkpoint_epoch_{args.checkpoint}.pth")
