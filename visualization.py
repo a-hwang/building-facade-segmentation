@@ -5,8 +5,9 @@ import matplotlib.pyplot as plt
 import cv2
 import numpy as np
 import rhino3dm
+import json  # for exporting raw data
 from utils import get_unique_filepath  # reuse helper from utils.py
-from evaluation import evaluate_model_bbox  # reuse helper from evaluation.py
+from evaluation import evaluate_model_bbox, evaluate_model_masks  # update imports
 
 def extract_edges_from_masks(masks):
     """
@@ -96,51 +97,170 @@ def visualize_predictions(image, prediction, categories, output_folder, base_nam
         print("No masks predicted; skipping mask visualization.")
     return masks
 
-def graph_model_performance(epochs, model, test_loader, device, checkpoints_folder, model_name):
+def graph_model_performance(epochs, model, test_loader, device, checkpoints_folder, model_name, evaluation_mode, target_class, train_coco):
     """
-    For each epoch in 'epochs', if the checkpoint exists, load it,
-    evaluate the model using bounding boxes, and then graph IoU,
-    Precision, Recall, and F1-Score.
-    The graph title will be <model>_epoch_<largest epoch>_graph.
+    Evaluate at each epoch using the specified evaluation mode (bbox or mask)
+    and graph performance. If target_class is provided:
+    - If target_class != "all": produce one graph (with 4 lines for metrics) for that class.
+    - If target_class == "all": for each metric, produce a graph with each class line and export 4 JSON files.
     """
-    epochs_list = []
-    iou_list = []
-    precision_list = []
-    recall_list = []
-    f1_list = []
-    
-    for epoch in sorted(epochs):
-        ckpt_path = os.path.join(checkpoints_folder, f"model_checkpoint_epoch_{epoch}.pth")
-        if not os.path.exists(ckpt_path):
-            print(f"Checkpoint for epoch {epoch} is missing. Skipping.")
-            continue
-        checkpoint = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(checkpoint)
-        metrics = evaluate_model_bbox(model, test_loader, device)
-        print(f"Epoch {epoch} - IoU: {metrics['IoU']:.4f}, Precision: {metrics['Precision']:.4f}, "
-              f"Recall: {metrics['Recall']:.4f}, F1: {metrics['F1-Score']:.4f}")
-        epochs_list.append(epoch)
-        iou_list.append(metrics['IoU'])
-        precision_list.append(metrics['Precision'])
-        recall_list.append(metrics['Recall'])
-        f1_list.append(metrics['F1-Score'])
-    
-    if not epochs_list:
-        print("No valid checkpoints found. Exiting graph generation.")
-        return
-    
-    largest_epoch = max(epochs_list)
-    plt.figure(figsize=(10, 6))
-    plt.plot(epochs_list, iou_list, label='IoU', marker='o')
-    plt.plot(epochs_list, precision_list, label='Precision', marker='o')
-    plt.plot(epochs_list, recall_list, label='Recall', marker='o')
-    plt.plot(epochs_list, f1_list, label='F1-Score', marker='o')
-    plt.xlabel("Epoch")
-    plt.ylabel("Metric Value")
-    plt.title(f"{model_name}_epoch_{largest_epoch}_graph")
-    plt.legend()
-    plt.grid(True)
-    graph_path = os.path.join("output", f"{model_name}_epoch_{largest_epoch}_graph.png")
-    plt.savefig(graph_path)
-    plt.close()
-    print(f"Performance graph saved to {graph_path}")
+    if target_class and target_class != "all":
+        # Single class graph: one graph with all 4 metrics.
+        epochs_list, iou_list, precision_list, recall_list, f1_list = [], [], [], [], []
+        raw_data = {}
+        for epoch in sorted(epochs):
+            ckpt_path = os.path.join(checkpoints_folder, f"model_checkpoint_epoch_{epoch}.pth")
+            if not os.path.exists(ckpt_path):
+                print(f"Epoch {epoch}: checkpoint missing, skipping.")
+                continue
+            checkpoint = torch.load(ckpt_path, map_location=device)
+            model.load_state_dict(checkpoint)
+            if evaluation_mode == "bbox":
+                from evaluation import evaluate_model_bbox_by_class
+                metrics = evaluate_model_bbox_by_class(model, test_loader, device, target_class, train_coco=train_coco)
+            else:
+                from evaluation import evaluate_model_masks_by_class
+                metrics = evaluate_model_masks_by_class(model, test_loader, device, target_class, train_coco=train_coco)
+            if not metrics:
+                continue
+            epochs_list.append(epoch)
+            iou_list.append(metrics['IoU'])
+            precision_list.append(metrics['Precision'])
+            recall_list.append(metrics['Recall'])
+            f1_list.append(metrics['F1-Score'])
+            raw_data[epoch] = metrics
+        if not epochs_list:
+            print("No valid epochs found for class evaluation.")
+            return
+        plt.figure(figsize=(10, 6))
+        plt.plot(epochs_list, iou_list, label='IoU', marker='o')
+        plt.plot(epochs_list, precision_list, label='Precision', marker='o')
+        plt.plot(epochs_list, recall_list, label='Recall', marker='o')
+        plt.plot(epochs_list, f1_list, label='F1-Score', marker='o')
+        plt.xlabel("Epoch")
+        plt.ylabel("Metric Value")
+        plt.title(f"{model_name}_class_{target_class}_{evaluation_mode}_graph")
+        plt.legend()
+        plt.grid(True)
+        graph_path = os.path.join("output", f"{model_name}_class_{target_class}_{evaluation_mode}_graph.png")
+        plt.savefig(graph_path)
+        plt.close()
+        print(f"Class-specific performance graph saved to {graph_path}")
+        # Export raw data for this class.
+        raw_json_path = os.path.join("output", f"{model_name}_raw_metrics_class_{target_class}_{evaluation_mode}_graph.json")
+        try:
+            from utils import get_unique_filepath
+            raw_json_path = get_unique_filepath(raw_json_path)
+        except ImportError:
+            pass
+        with open(raw_json_path, 'w') as f:
+            json.dump(raw_data, f, indent=4)
+        print(f"Raw metrics for class saved to {raw_json_path}")
+    elif target_class == "all":
+        # All classes: For each metric create separate graphs.
+        class_list = ["facade", "balcony-fence", "car", "fence", "non-building-infrastructure", "shop", "street", "traffic-infrastructure", "vegetation", "window"]
+        raw_data = {metric: {} for metric in ["IoU", "Precision", "Recall", "F1-Score"]}
+        data_by_class = {metric: {cls: ([], []) for cls in class_list} for metric in ["IoU", "Precision", "Recall", "F1-Score"]}
+        for epoch in sorted(epochs):
+            ckpt_path = os.path.join(checkpoints_folder, f"model_checkpoint_epoch_{epoch}.pth")
+            if not os.path.exists(ckpt_path):
+                continue
+            checkpoint = torch.load(ckpt_path, map_location=device)
+            model.load_state_dict(checkpoint)
+            for cls in class_list:
+                if evaluation_mode == "bbox":
+                    from evaluation import evaluate_model_bbox_by_class
+                    metrics = evaluate_model_bbox_by_class(model, test_loader, device, cls, train_coco=train_coco)
+                else:
+                    from evaluation import evaluate_model_masks_by_class
+                    metrics = evaluate_model_masks_by_class(model, test_loader, device, cls, train_coco=train_coco)
+                if not metrics:
+                    continue
+                for metric in ["IoU", "Precision", "Recall", "F1-Score"]:
+                    data_by_class[metric][cls][0].append(epoch)
+                    data_by_class[metric][cls][1].append(metrics[metric])
+                    raw_data[metric].setdefault(epoch, {})[cls] = metrics[metric]
+        for metric in ["IoU", "Precision", "Recall", "F1-Score"]:
+            plt.figure(figsize=(10, 6))
+            for cls in class_list:
+                epochs_list, values = data_by_class[metric][cls]
+                if epochs_list:
+                    plt.plot(epochs_list, values, label=cls, marker='o')
+            plt.xlabel("Epoch")
+            plt.ylabel(metric)
+            plt.title(f"{model_name}_all_classes_{metric}_graph")
+            plt.legend()
+            plt.grid(True)
+            graph_path = os.path.join("output", f"{model_name}_all_classes_{metric}_graph.png")
+            plt.savefig(graph_path)
+            plt.close()
+            print(f"All-classes {metric} graph saved to {graph_path}")
+            raw_json_path = os.path.join("output", f"{model_name}_raw_metrics_all_classes_{metric}_graph.json")
+            try:
+                from utils import get_unique_filepath
+                raw_json_path = get_unique_filepath(raw_json_path)
+            except ImportError:
+                pass
+            with open(raw_json_path, 'w') as f:
+                json.dump(raw_data[metric], f, indent=4)
+            print(f"Raw metrics for {metric} saved to {raw_json_path}")
+    else:
+        # No target_class specified: fallback to aggregated graph.
+        epochs_list = []
+        iou_list = []
+        precision_list = []
+        recall_list = []
+        f1_list = []
+        raw_data = {}  # for exporting raw metrics
+
+        for epoch in sorted(epochs):
+            ckpt_path = os.path.join(checkpoints_folder, f"model_checkpoint_epoch_{epoch}.pth")
+            if not os.path.exists(ckpt_path):
+                print(f"Checkpoint for epoch {epoch} is missing. Skipping.")
+                continue
+            checkpoint = torch.load(ckpt_path, map_location=device)
+            model.load_state_dict(checkpoint)
+            if evaluation_mode == "bbox":
+                metrics = evaluate_model_bbox(model, test_loader, device)
+            else:
+                metrics = evaluate_model_masks(model, test_loader, device)
+            print(f"Epoch {epoch} - IoU: {metrics['IoU']:.4f}, Precision: {metrics['Precision']:.4f}, "
+                  f"Recall: {metrics['Recall']:.4f}, F1: {metrics['F1-Score']:.4f}")
+            epochs_list.append(epoch)
+            iou_list.append(metrics['IoU'])
+            precision_list.append(metrics['Precision'])
+            recall_list.append(metrics['Recall'])
+            f1_list.append(metrics['F1-Score'])
+            raw_data[epoch] = metrics
+
+        if not epochs_list:
+            print("No valid checkpoints found. Exiting graph generation.")
+            return
+
+        largest_epoch = max(epochs_list)
+        plt.figure(figsize=(10, 6))
+        plt.plot(epochs_list, iou_list, label='IoU', marker='o')
+        plt.plot(epochs_list, precision_list, label='Precision', marker='o')
+        plt.plot(epochs_list, recall_list, label='Recall', marker='o')
+        plt.plot(epochs_list, f1_list, label='F1-Score', marker='o')
+        plt.xlabel("Epoch")
+        plt.ylabel("Metric Value")
+        plt.title(f"{model_name}_epoch_{largest_epoch}_{evaluation_mode}_graph")
+        plt.legend()
+        plt.grid(True)
+        graph_path = os.path.join("output", f"{model_name}_epoch_{largest_epoch}_{evaluation_mode}_graph.png")
+        plt.savefig(graph_path)
+        plt.close()
+        print(f"Performance graph saved to {graph_path}")
+        
+        # Export raw data as JSON.
+        raw_json_path = os.path.join("output", f"{model_name}_raw_metrics_{evaluation_mode}_graph.json")
+        # Use get_unique_filepath helper if available
+        try:
+            from utils import get_unique_filepath
+            raw_json_path = get_unique_filepath(raw_json_path)
+        except ImportError:
+            pass
+        with open(raw_json_path, 'w') as f:
+            json.dump(raw_data, f, indent=4)
+        print(f"Raw metrics data saved to {raw_json_path}")

@@ -9,14 +9,21 @@ from torch.utils.data import DataLoader
 
 from dataset import COCODataset, Compose, ToTensor, Normalize, collate_fn
 from model_utils import build_model
-from evaluation import evaluate_model_bbox  # default evaluation is bbox
+from evaluation import evaluate_model_bbox, evaluate_model_masks  # update imports
 from visualization import visualize_predictions, export_to_rhino
 from utils import get_device, to_device, get_unique_filepath
+
+# Add allowed class names in lowercase.
+ALLOWED_CLASSES = ["facade", "balcony-fence", "car", "fence", "non-building-infrastructure", "shop", "street", "traffic-infrastructure", "vegetation", "window", "all"]
 
 def main():
     parser = argparse.ArgumentParser(description="Edge Detector")
     parser.add_argument('--train', type=int, metavar='N', help="Train model for N epochs")
-    parser.add_argument('--evaluate', action='store_true', help="Evaluate model performance on test set using bounding boxes")
+    # Change --evaluate to accept parameters "bbox" or "mask"
+    parser.add_argument('--evaluate', type=str, choices=["bbox", "mask"],
+                        help="Run evaluation on the test set. Specify evaluation type (bbox or mask).")
+    parser.add_argument('--class', dest="target_class", type=str, choices=ALLOWED_CLASSES,
+                        help="Evaluate only a specific class (e.g. 'window') or 'all' for per-class graphs")
     parser.add_argument('--inference', action='store_true', help="Run inference only on a test image")
     parser.add_argument('--random', action='store_true', help="Select a random test image from the test folder")
     parser.add_argument('--file', type=str, help="Specify a test image file for inference")
@@ -40,6 +47,10 @@ def main():
     # Require at least one of the operations to be specified.
     if not any([args.train is not None, args.evaluate, args.inference, args.graph_epochs, args.graph_range]):
         parser.error("At least one of --train, --evaluate, --inference, --graph-epochs or --graph-range must be specified")
+    
+    # When graph arguments are provided, require --evaluate
+    if (args.graph_epochs or args.graph_range) and args.evaluate is None:
+        parser.error("When using graph commands, --evaluate must be specified with a value (bbox or mask)")
     
     # Set device.
     if args.force_cpu:
@@ -129,19 +140,31 @@ def main():
             model = model.cpu()
 
     # Evaluation phase.
-    if args.evaluate:
-        print("\nEvaluating model on test set using bounding boxes...")
+    if args.evaluate is not None and not (args.graph_epochs or args.graph_range):
+        print(f"\nEvaluating model on test set using {args.evaluate} evaluation...")
         test_dataset = COCODataset("test/_annotations.coco.json", transforms=transform)
         test_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
-        metrics = evaluate_model_bbox(model, test_loader, device)
+        checkpoint_info = args.checkpoint if args.checkpoint is not None else "latest"
+        if args.target_class:
+            # Call new class-filtered evaluation functions.
+            if args.evaluate == "bbox":
+                from evaluation import evaluate_model_bbox_by_class
+                metrics = evaluate_model_bbox_by_class(model, test_loader, device, args.target_class, train_coco= train_coco)
+            else:
+                from evaluation import evaluate_model_masks_by_class
+                metrics = evaluate_model_masks_by_class(model, test_loader, device, args.target_class, train_coco= train_coco)
+        else:
+            # Default aggregated evaluation.
+            if args.evaluate == "bbox":
+                metrics = evaluate_model_bbox(model, test_loader, device)
+            else:
+                metrics = evaluate_model_masks(model, test_loader, device)
         print("\nEvaluation Results:")
         print(f"Mean IoU: {metrics['IoU']:.4f}")
         print(f"Precision: {metrics['Precision']:.4f}")
         print(f"Recall: {metrics['Recall']:.4f}")
         print(f"F1-Score: {metrics['F1-Score']:.4f}")
-
-        checkpoint_info = args.checkpoint if args.checkpoint is not None else "latest"
-        results_filename = f"{args.model}_epoch_{checkpoint_info}_bbox_evaluation_results.json"
+        results_filename = f"{args.model}_epoch_{checkpoint_info}_{args.evaluate}_{args.target_class or 'all'}_evaluation_results.json"
         results_path = os.path.join("output", results_filename)
         with open(results_path, 'w') as f:
             json.dump(metrics, f, indent=4)
@@ -187,7 +210,6 @@ def main():
 
     # Graphing phase.
     if args.graph_epochs or args.graph_range:
-        # Prepare test dataset/loader for evaluation.
         test_dataset = COCODataset("test/_annotations.coco.json", transforms=transform)
         test_loader = DataLoader(test_dataset, batch_size=1, collate_fn=collate_fn)
         epochs_to_graph = set()
@@ -201,7 +223,9 @@ def main():
                 print(f"Could not parse --graph-range: {args.graph_range}. Error: {str(e)}")
         checkpoints_folder = f"{args.model}_checkpoints"
         from visualization import graph_model_performance
-        graph_model_performance(list(epochs_to_graph), model, test_loader, device, checkpoints_folder, args.model)
+        # Pass the evaluate type, target class, and train_coco.
+        graph_model_performance(list(epochs_to_graph), model, test_loader, device,
+                                checkpoints_folder, args.model, args.evaluate, args.target_class, train_coco)
 
 if __name__ == "__main__":
     main()
